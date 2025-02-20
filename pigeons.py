@@ -34,6 +34,15 @@ import sqlite3
 import os
 import atexit
 
+class HaveHitAWallError(Exception):
+    """Custom Exception"""
+    def __init__(self, message):
+        super().__init__(message)  # Call Exception's constructor
+
+    def __str__(self):
+        return f"[Error] {self.args[0]}"  # Custom string representation
+
+
 class DataFrameEngine:
     def __init__(self, db_path="pigeons.db"):
         self.db_path = db_path
@@ -44,7 +53,8 @@ class DataFrameEngine:
         self._register_functions()
 
         atexit.register(self.cleanup)
-    
+
+
     def _register_functions(self):
         def test(x):
             return 1
@@ -81,13 +91,58 @@ class DataFrame:
         self.data = data
         self.view_sql = self._create_table()
         self.view_where = '1 = 1'
+        self.index_slice = None
 
         DataFrame.counter += 1
 
         if self.data is not None:
             self._load_data()
         
+    def __getitem__(self, index):        
+        
+        if isinstance(index, slice):
+            start, stop, step = index.start, index.stop, index.step
+            
+            if start is None or start < 0: # not doing reverse slicing for now
+                start = 0
+            start_part = f"_idx >= {str(start)}"
 
+            if stop is None:
+                stop_part = ''
+            
+            elif stop < 0:
+                stop_part = f" and _idx <= (select count(*){str(stop)} from ({self._return_df_sql()}))"
+            
+            elif stop > start:
+                stop_part = f" and _idx < {str(stop)}"
+
+            else:
+                raise HaveHitAWallError("Whatever you were trying to do can't be done. Maybe stick to positive values for slices plz")
+
+
+                
+            view_sql = f"select * from vw_{self.table_name}"
+            view_where = start_part + stop_part
+
+            if step:
+                raise HaveHitAWallError("can't do steps yet sorry")
+
+        elif isinstance(index, list):
+            cols = index
+            view_sql = f"select {', '.join([c for c in cols])} from ({self._return_df_sql()})"
+            view_where = '1=1'
+            
+        elif isinstance(index, int):
+            view_sql = f"select * from ({self._return_df_sql()})"
+            view_where = f"_idx = {index+1}"
+        else:
+            raise HaveHitAWallError("You didn't provide a slice of rows or a list of column names. What did you expect???")
+        
+        new_df = DataFrame()
+        new_df._modify_view(view_sql=view_sql, view_where=view_where)
+        return new_df
+
+        
     def _get_create_sql(self):
         dtypes = ', '.join([f'{key} {value}' for key, value in self.dtypes.items()])
         table_sql = f"""
@@ -98,7 +153,12 @@ class DataFrame:
 
         view_sql = f"""
             CREATE VIEW vw_{self.table_name} AS
-            SELECT * FROM {self.table_name}
+            WITH _index 
+            as
+            (
+                SELECT row_number() over () -1 as _idx, * FROM {self.table_name}
+            )
+            select * from _index
         """
 
         return table_sql, view_sql
@@ -109,12 +169,31 @@ class DataFrame:
 
         cursor.execute(f'DROP VIEW IF EXISTS vw_{self.table_name}')
         
-        sql = f'CREATE VIEW vw_{self.table_name} AS select * from (' + view_sql + ") WHERE " + view_where
+        sql = f"""CREATE VIEW vw_{self.table_name} AS
+        WITH _index
+         as
+          (
+           select row_number() over () -1 as _idx , * from ({view_sql} WHERE {view_where})
+            )
+            select * from _index""" 
         cursor.execute(sql)
         self.view_sql= view_sql
         self.view_where = view_where
         
+    def _return_df_sql(self):
+        
+        if self.index_slice:
+            limit_stmt = f'{self.index_slice}'
+        else:
+            limit_stmt = '1=1'
+        
+        sql = f"""
+            select * from vw_{self.table_name}
+            where {limit_stmt} 
+        """
+        return sql
     
+
     def _create_table(self):
         conn = self.engine.get_connection()
         cursor = conn.cursor()
@@ -137,11 +216,15 @@ class DataFrame:
         
         conn.commit()
 
-    
+
+    def _limit_offset(self):
+        pass
+
+
     def fetch_all(self):
         conn = self.engine.get_connection()
         cursor = conn.cursor()
-        cursor.execute(f"select * from vw_{self.table_name}")
+        cursor.execute(self._return_df_sql())
         rows = cursor.fetchall()
         results = []
         for row in rows:
@@ -154,15 +237,16 @@ class DataFrame:
         new_df = DataFrame()
         
         if on is None and (left_on is None or right_on is None):
-            raise Exception("You did not set on properly")
+            raise HaveHitAWallError("You did not set on, left_on, right_on attributes correctly. Do try again.")
         elif on is not None:
             left_on = on
             right_on = on
         elif (left_on is None or right_on is None):
-            raise Exception("You did not set on properly")
+            raise HaveHitAWallError("You did not set on, left_on, right_on attributes correctly. Do try again.")
 
         left_fields = list(self.dtypes.keys())
         right_fields = list(df.dtypes.keys())
+
         for f in left_fields:
             if f in right_fields:
                 element = right_fields.index(f)
@@ -172,16 +256,19 @@ class DataFrame:
                 else:
                     del right_fields[element]
         
-
+        if right_fields == []:
+            sep = ''
+        else:
+            sep = ', ' 
         join_type = {'inner': 'INNER JOIN', 'cross': 'CROSS JOIN', 'left': 'LEFT JOIN'}
 
         sql = f"""
         select {' ,'.join(['l.'+ x for x in left_fields])}
-        ,{' ,'.join(['r.'+ x for x in right_fields])}
+        {sep}{' ,'.join(['r.'+ x for x in right_fields])}
         from
-            vw_{self.table_name} l
+            ({self._return_df_sql()}) l
         {join_type[how]}
-            vw_{df.table_name} r"""
+            ({df._return_df_sql()}) r"""
         
         if how != 'cross':
             sql = sql + f" on l.{left_on} = r.{right_on}"
@@ -197,7 +284,7 @@ class DataFrame:
     def head(self, num_rows=10):
         conn = self.engine.get_connection()
         cursor = conn.cursor()
-        cursor.execute(f"select * from vw_{self.table_name} limit {str(num_rows)}")
+        cursor.execute(f"select * from ({self._return_df_sql()}) limit {str(num_rows)}")
         res = cursor.fetchall()
         results = []
         for index, row in enumerate(res):
@@ -230,7 +317,7 @@ class DataFrame:
                     if include_header:
                         file.write(sep.join(header)+'\n')
                 
-                file.write(sep.join(['"' + row[h] + '"' for h in header ])+'\n')
+                file.write(sep.join(['"' + str(row[h]) + '"' for h in header ])+'\n')
             
             file.close()
 
