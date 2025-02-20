@@ -7,11 +7,11 @@ Pigeons is a crap version of pandas
  - Just this one .py file
 
 You would typically import using `import pigeons as cd`
-You can then create a DataFrame like `dt = cd.DataFrame()`
-You can import from a CSV: `dt = cd.from_csv('my_csv.csv')` - good chance it won't work.
+You can then create a DataFrame like `df = pg.DataFrame()`
+You can import from a CSV: `df = pg.from_csv('my_csv.csv')` - good chance it won't work.
 You can do the following:
 ```
-dt = dt1.merge(dt2, how='inner', left_on='blah', right_on='blah)
+df = df1.merge(df2, how='inner', left_on='blah', right_on='blah)
 df.where("foo = 'yes'")
 df.head(100)
 df.to_csv('output_csv.csv')
@@ -21,7 +21,7 @@ data = df.fetch_all()
 To load data without a csv, you should pass it in as a list of dictionaries, e.g. 
 ```
 my_data = [{'foo': 'bar'},{'foo': 'baz'}]
-dt = cd.DataFrame(data=my_data)
+df = pg.DataFrame(data=my_data)
 ```
 
 This is the same structure that `DataFrame.fetch_all()` will return results in. 
